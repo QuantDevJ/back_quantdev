@@ -1,0 +1,69 @@
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+.conda/
+.python-version
+
+# --- Packaging / build artifacts ---
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# --- Test / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+nosetests.xml
+junit.xml
+
+# --- Type checking / linters ---
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# --- Logs / local runtime files ---
+*.log
+*.pid
+
+# --- Local secrets / environment files ---
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# --- FastAPI/Uvicorn/Starlette ---
+*.sqlite3
+instance/
+
+# --- Alembic ---
+# (keep your migration scripts tracked; ignore only compiled/cache files)
+**/alembic/__pycache__/
+**/migrations/__pycache__/
+*.pyc
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# --- Docker / Compose local overrides ---
+docker-compose.override.yml
+
+# --- Misc ---
+.ipynb_checkpoints/
+
+claude.md

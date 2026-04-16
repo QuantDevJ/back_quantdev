@@ -13,7 +13,7 @@ from sqlalchemy import and_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.db.models import Holding, PerformanceSnapshot
+from app.db.models import Account, AccountSnapshot, Holding, PerformanceSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +180,162 @@ class SnapshotService:
             func.max(PerformanceSnapshot.snapshot_date),
         ).filter(
             PerformanceSnapshot.holding_id == holding_id
+        ).first()
+
+        if result:
+            return result[0], result[1]
+        return None, None
+
+
+class AccountSnapshotService:
+    """Service for creating and querying account balance snapshots.
+
+    Account snapshots capture the balance state of an account at a specific
+    point in time, enabling balance history tracking and timeline views.
+    """
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def create_snapshot_for_account(
+        self,
+        account: Account,
+        snapshot_date: Optional[date] = None,
+    ) -> Optional[AccountSnapshot]:
+        """Create a balance snapshot for a single account.
+
+        Uses upsert logic via unique constraint to prevent duplicates.
+
+        Args:
+            account: The Account object to snapshot
+            snapshot_date: Date for the snapshot (defaults to today)
+
+        Returns:
+            Created or updated AccountSnapshot, or None if skipped
+        """
+        if snapshot_date is None:
+            snapshot_date = date.today()
+
+        # Skip accounts without balance
+        if account.current_balance is None:
+            logger.debug("Skipping snapshot for account %s without balance", account.id)
+            return None
+
+        current_balance = float(account.current_balance)
+        available_balance = float(account.available_balance) if account.available_balance is not None else None
+
+        # Use PostgreSQL upsert (INSERT ... ON CONFLICT)
+        stmt = insert(AccountSnapshot).values(
+            account_id=account.id,
+            snapshot_date=snapshot_date,
+            current_balance=current_balance,
+            available_balance=available_balance,
+            currency=account.currency or "USD",
+        )
+
+        # On conflict, update the values
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_account_snapshot_account_date",
+            set_={
+                "current_balance": stmt.excluded.current_balance,
+                "available_balance": stmt.excluded.available_balance,
+                "currency": stmt.excluded.currency,
+            },
+        )
+
+        self.db.execute(stmt)
+        self.db.flush()
+
+        # Fetch the upserted snapshot
+        snapshot = (
+            self.db.query(AccountSnapshot)
+            .filter(
+                AccountSnapshot.account_id == account.id,
+                AccountSnapshot.snapshot_date == snapshot_date,
+            )
+            .first()
+        )
+
+        return snapshot
+
+    def create_snapshots_for_accounts(
+        self,
+        accounts: list[Account],
+        snapshot_date: Optional[date] = None,
+    ) -> int:
+        """Create snapshots for multiple accounts in bulk.
+
+        Args:
+            accounts: List of Account objects to snapshot
+            snapshot_date: Date for all snapshots (defaults to today)
+
+        Returns:
+            Number of snapshots created/updated
+        """
+        if snapshot_date is None:
+            snapshot_date = date.today()
+
+        count = 0
+        for account in accounts:
+            snapshot = self.create_snapshot_for_account(account, snapshot_date)
+            if snapshot is not None:
+                count += 1
+
+        logger.info("Created/updated %d account snapshots for date %s", count, snapshot_date)
+        return count
+
+    def get_account_history(
+        self,
+        account_id: UUID,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        limit: int = 365,
+    ) -> list[AccountSnapshot]:
+        """Get balance history for an account.
+
+        Args:
+            account_id: ID of the account
+            start_date: Start of date range (inclusive)
+            end_date: End of date range (inclusive)
+            limit: Maximum number of snapshots to return
+
+        Returns:
+            List of AccountSnapshot ordered by date descending
+        """
+        query = self.db.query(AccountSnapshot).filter(
+            AccountSnapshot.account_id == account_id
+        )
+
+        if start_date is not None:
+            query = query.filter(AccountSnapshot.snapshot_date >= start_date)
+
+        if end_date is not None:
+            query = query.filter(AccountSnapshot.snapshot_date <= end_date)
+
+        snapshots = (
+            query.order_by(AccountSnapshot.snapshot_date.desc())
+            .limit(limit)
+            .all()
+        )
+
+        return snapshots
+
+    def get_date_range_for_account(self, account_id: UUID) -> tuple[Optional[date], Optional[date]]:
+        """Get the earliest and latest snapshot dates for an account.
+
+        Args:
+            account_id: ID of the account
+
+        Returns:
+            Tuple of (earliest_date, latest_date) or (None, None) if no snapshots
+        """
+        from sqlalchemy import func
+
+        result = self.db.query(
+            func.min(AccountSnapshot.snapshot_date),
+            func.max(AccountSnapshot.snapshot_date),
+        ).filter(
+            AccountSnapshot.account_id == account_id
         ).first()
 
         if result:

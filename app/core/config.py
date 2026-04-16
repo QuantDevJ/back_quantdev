@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     plaid_env: str = "sandbox"
     backend_base_url: Optional[str] = None
 
+    # Snapshot cron job settings
+    snapshot_cron_enabled: bool = False
+    sync_interval_hours: int = 24
+
     def get_database_url(self) -> str:
         if self.database_url:
             return self.database_url

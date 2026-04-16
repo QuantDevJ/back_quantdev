@@ -26,6 +26,13 @@ class SyncStatus(str, enum.Enum):
     failed = "failed"
 
 
+class BackfillStatus(str, enum.Enum):
+    pending = "pending"
+    in_progress = "in_progress"
+    completed = "completed"
+    failed = "failed"
+
+
 class AccountType(str, enum.Enum):
     k401 = "401k"
     a401 = "401a"
@@ -126,6 +133,17 @@ class PlaidConnection(Base):
     transaction_cursor: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     transaction_cursor_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # Backfill tracking fields
+    backfill_status: Mapped[BackfillStatus] = mapped_column(
+        Enum(BackfillStatus, name="backfill_status"),
+        server_default=BackfillStatus.pending.value,
+        nullable=False,
+    )
+    backfill_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    backfill_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    backfill_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    backfill_snapshots_created: Mapped[int] = mapped_column(server_default="0", nullable=False)
 
 
 class Account(Base):
@@ -273,6 +291,19 @@ class PerformanceSnapshot(Base):
     cost_basis_total: Mapped[Optional[float]] = mapped_column(Numeric(15, 2))
     unrealized_gain: Mapped[Optional[float]] = mapped_column(Numeric(15, 2))
     unrealized_gain_pct: Mapped[Optional[float]] = mapped_column(Numeric(6, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AccountSnapshot(Base):
+    __tablename__ = "account_snapshots"
+    __table_args__ = (UniqueConstraint("account_id", "snapshot_date", name="uq_account_snapshot_account_date"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    current_balance: Mapped[float] = mapped_column(Numeric(15, 2), nullable=False)
+    available_balance: Mapped[Optional[float]] = mapped_column(Numeric(15, 2))
+    currency: Mapped[str] = mapped_column(String(3), server_default="USD", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

@@ -10,3 +10,4 @@ passlib[bcrypt]
 bcrypt==3.2.2
 cryptography
 plaid-python>=18,<37
+apscheduler>=3.10,<4

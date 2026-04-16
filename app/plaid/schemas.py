@@ -72,3 +72,65 @@ class HoldingHistoryResponse(BaseModel):
     snapshots: list[SnapshotOut]
     earliest_date: Optional[date] = None
     latest_date: Optional[date] = None
+
+
+class AccountSnapshotOut(BaseModel):
+    """Account balance snapshot data for a single point in time."""
+    id: str
+    snapshot_date: date
+    current_balance: float
+    available_balance: Optional[float] = None
+    currency: str = "USD"
+
+
+class AccountHistoryResponse(BaseModel):
+    """Response containing account balance history with snapshots."""
+    account_id: str
+    account_name: Optional[str] = None
+    institution_name: Optional[str] = None
+    account_type: Optional[str] = None
+    snapshots: list[AccountSnapshotOut]
+    earliest_date: Optional[date] = None
+    latest_date: Optional[date] = None
+
+
+class TimelineDataPoint(BaseModel):
+    """Single data point in the aggregated timeline."""
+    date: date
+    total_balance: float
+    account_count: int
+
+
+class AccountSummary(BaseModel):
+    """Summary info for an account in the aggregated response."""
+    id: str
+    name: Optional[str] = None
+    institution_name: Optional[str] = None
+    type: Optional[str] = None
+    current_balance: Optional[float] = None
+
+
+class AggregatedAccountHistoryResponse(BaseModel):
+    """Response containing aggregated balance history across all accounts."""
+    timeline: list[TimelineDataPoint]
+    accounts: list[AccountSummary]
+    earliest_date: Optional[date] = None
+    latest_date: Optional[date] = None
+    total_accounts: int
+
+
+class BackfillStatusResponse(BaseModel):
+    """Response containing historical backfill status for a connection."""
+    status: str  # pending, in_progress, completed, failed
+    progress_percent: float
+    snapshots_created: int
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class BackfillTriggerResponse(BaseModel):
+    """Response after triggering a backfill job."""
+    message: str
+    connection_id: str
+    status: str

@@ -243,6 +243,56 @@ def get_holding_history(
 
 
 @router.get(
+    "/accounts/history",
+    summary="Get aggregated account balance history",
+    description="Returns aggregated balance timeline across all accounts. Shows total portfolio value over time for timeline/chart views.",
+)
+def get_all_accounts_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    start_date: Optional[date] = Query(default=None, description="Start of date range (inclusive)"),
+    end_date: Optional[date] = Query(default=None, description="End of date range (inclusive)"),
+    limit: int = Query(default=365, ge=1, le=1000, description="Maximum number of data points to return"),
+) -> JSONResponse:
+    from app.plaid.service import PlaidService
+
+    data = PlaidService(db).get_all_accounts_history(
+        user_id=current_user.id,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+    )
+    body, status_code = success_response(data)
+    return JSONResponse(content=body, status_code=status_code)
+
+
+@router.get(
+    "/accounts/{account_id}/history",
+    summary="Get account balance history",
+    description="Returns balance snapshots for a specific account over time. Use for timeline/chart views.",
+)
+def get_account_history(
+    account_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    start_date: Optional[date] = Query(default=None, description="Start of date range (inclusive)"),
+    end_date: Optional[date] = Query(default=None, description="End of date range (inclusive)"),
+    limit: int = Query(default=365, ge=1, le=1000, description="Maximum number of snapshots to return"),
+) -> JSONResponse:
+    from app.plaid.service import PlaidService
+
+    data = PlaidService(db).get_account_history(
+        user_id=current_user.id,
+        account_id=account_id,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+    )
+    body, status_code = success_response(data)
+    return JSONResponse(content=body, status_code=status_code)
+
+
+@router.get(
     "/transactions",
     summary="Get all transactions",
     description="Returns investment transactions for the current user with pagination. Use 'page' for page number (0-indexed).",
@@ -326,5 +376,102 @@ def get_banking_transactions(
         page=page,
         account_id=account_id,
     )
+    body, status_code = success_response(data)
+    return JSONResponse(content=body, status_code=status_code)
+
+
+@router.post(
+    "/connections/{connection_id}/backfill",
+    summary="Trigger historical backfill",
+    description="Manually trigger a historical snapshot backfill for a connection. Reconstructs up to 2 years of portfolio history from transactions.",
+)
+def trigger_backfill(
+    connection_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    from app.db.models import PlaidConnection, BackfillStatus
+    from app.scheduler import schedule_backfill_job
+
+    # Verify connection exists and belongs to user
+    connection = (
+        db.query(PlaidConnection)
+        .filter(
+            PlaidConnection.id == connection_id,
+            PlaidConnection.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not connection:
+        from app.core.exceptions import AppException
+        from starlette import status
+        raise AppException(
+            code="NOT_FOUND",
+            message="Plaid connection not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    # Check if backfill is already in progress
+    if connection.backfill_status == BackfillStatus.in_progress:
+        data = {
+            "message": "Backfill already in progress",
+            "connection_id": str(connection_id),
+            "status": "in_progress",
+        }
+        body, status_code = success_response(data)
+        return JSONResponse(content=body, status_code=status_code)
+
+    # Reset backfill status and schedule job
+    connection.backfill_status = BackfillStatus.pending
+    connection.backfill_error = None
+    connection.backfill_snapshots_created = 0
+    db.commit()
+
+    schedule_backfill_job(connection_id)
+
+    data = {
+        "message": "Backfill job scheduled",
+        "connection_id": str(connection_id),
+        "status": "pending",
+    }
+    body, status_code = success_response(data)
+    return JSONResponse(content=body, status_code=status_code)
+
+
+@router.get(
+    "/connections/{connection_id}/backfill-status",
+    summary="Get backfill status",
+    description="Returns the current status of historical snapshot backfill for a connection.",
+)
+def get_backfill_status(
+    connection_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    from app.db.models import PlaidConnection
+    from app.plaid.historical_backfill import HistoricalBackfillService
+
+    # Verify connection exists and belongs to user
+    connection = (
+        db.query(PlaidConnection)
+        .filter(
+            PlaidConnection.id == connection_id,
+            PlaidConnection.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not connection:
+        from app.core.exceptions import AppException
+        from starlette import status
+        raise AppException(
+            code="NOT_FOUND",
+            message="Plaid connection not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    service = HistoricalBackfillService(db)
+    data = service.get_backfill_status(connection_id)
     body, status_code = success_response(data)
     return JSONResponse(content=body, status_code=status_code)

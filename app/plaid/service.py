@@ -20,7 +20,7 @@ from app.core.exceptions import AppException
 from app.core.security import decrypt_email, encrypt_email
 from app.db.models import Account, AccountType, BankingTransaction, Holding, PlaidConnection, PlaidConnectionStatus, Security, SecurityType, SyncStatus, Transaction, TransactionType
 from app.plaid.normalizers import PlaidInvestmentsNormalizer
-from app.plaid.snapshots import SnapshotService
+from app.plaid.snapshots import AccountSnapshotService, SnapshotService
 
 
 def _plaid_error_message(exc: PlaidApiException) -> str:
@@ -158,6 +158,14 @@ class PlaidService:
 
             row.sync_status = SyncStatus.completed
             self.db.commit()
+
+            # Trigger historical backfill in background
+            try:
+                from app.scheduler import schedule_backfill_job
+                schedule_backfill_job(connection_id)
+            except Exception as backfill_err:
+                # Log but don't fail - backfill is non-critical
+                logger.warning("Failed to schedule backfill for connection %s: %s", connection_id, backfill_err)
         except Exception as e:
             logger.exception("Initial sync failed for connection %s", connection_id)
             self.db.rollback()
@@ -666,6 +674,18 @@ class PlaidService:
             snapshot_service = SnapshotService(self.db)
             snapshots_created = snapshot_service.create_snapshots_for_holdings(upserted_holdings)
 
+        # Step 4b: Create account snapshots for all synced accounts
+        account_snapshots_created = 0
+        if plaid_account_map:
+            account_ids = list(plaid_account_map.values())
+            synced_accounts = (
+                self.db.query(Account)
+                .filter(Account.id.in_(account_ids))
+                .all()
+            )
+            account_snapshot_service = AccountSnapshotService(self.db)
+            account_snapshots_created = account_snapshot_service.create_snapshots_for_accounts(synced_accounts)
+
         # Step 5: Fetch and store investment transactions using normalizer
         transactions_created = 0
         transactions_updated = 0
@@ -777,6 +797,7 @@ class PlaidService:
             "transactions_created": transactions_created,
             "transactions_updated": transactions_updated,
             "snapshots_created": snapshots_created,
+            "account_snapshots_created": account_snapshots_created,
         }
 
     def get_stored_portfolio(self, *, user_id: UUID, connection_id: UUID) -> dict:
@@ -1220,6 +1241,190 @@ class PlaidService:
             "snapshots": snapshots_data,
             "earliest_date": earliest_date.isoformat() if earliest_date else None,
             "latest_date": latest_date.isoformat() if latest_date else None,
+        }
+
+    def get_account_history(
+        self,
+        *,
+        user_id: UUID,
+        account_id: UUID,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        limit: int = 365,
+    ) -> dict:
+        """Get balance history for a specific account.
+
+        Args:
+            user_id: ID of the user (for authorization)
+            account_id: ID of the account
+            start_date: Start of date range (optional)
+            end_date: End of date range (optional)
+            limit: Maximum number of snapshots to return
+
+        Returns:
+            Dict with account metadata and snapshots list
+        """
+        # Verify account belongs to user
+        account = (
+            self.db.query(Account)
+            .filter(
+                Account.id == account_id,
+                Account.user_id == user_id,
+            )
+            .first()
+        )
+
+        if not account:
+            raise AppException(
+                code="NOT_FOUND",
+                message="Account not found.",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Get snapshots using AccountSnapshotService
+        snapshot_service = AccountSnapshotService(self.db)
+        snapshots = snapshot_service.get_account_history(
+            account_id=account_id,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+        )
+
+        # Get date range
+        earliest_date, latest_date = snapshot_service.get_date_range_for_account(account_id)
+
+        # Format snapshots
+        snapshots_data = [
+            {
+                "id": str(s.id),
+                "snapshot_date": s.snapshot_date.isoformat(),
+                "current_balance": float(s.current_balance),
+                "available_balance": float(s.available_balance) if s.available_balance is not None else None,
+                "currency": s.currency,
+            }
+            for s in snapshots
+        ]
+
+        return {
+            "account_id": str(account_id),
+            "account_name": account.account_name,
+            "institution_name": account.institution_name,
+            "account_type": account.account_type.value if account.account_type else None,
+            "snapshots": snapshots_data,
+            "earliest_date": earliest_date.isoformat() if earliest_date else None,
+            "latest_date": latest_date.isoformat() if latest_date else None,
+        }
+
+    def get_all_accounts_history(
+        self,
+        *,
+        user_id: UUID,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        limit: int = 365,
+    ) -> dict:
+        """Get aggregated balance history across all user accounts.
+
+        Returns daily totals by summing balances across all accounts for each date.
+        Useful for showing total portfolio value over time in timeline/chart views.
+
+        Args:
+            user_id: ID of the user
+            start_date: Start of date range (optional)
+            end_date: End of date range (optional)
+            limit: Maximum number of data points to return
+
+        Returns:
+            Dict with aggregated timeline data and per-account breakdown
+        """
+        from sqlalchemy import func
+        from app.db.models import AccountSnapshot
+
+        # Get all account IDs for this user
+        account_ids = [
+            acc.id for acc in
+            self.db.query(Account.id).filter(Account.user_id == user_id).all()
+        ]
+
+        if not account_ids:
+            return {
+                "timeline": [],
+                "accounts": [],
+                "earliest_date": None,
+                "latest_date": None,
+                "total_accounts": 0,
+            }
+
+        # Build query for aggregated daily totals
+        query = (
+            self.db.query(
+                AccountSnapshot.snapshot_date,
+                func.sum(AccountSnapshot.current_balance).label("total_balance"),
+                func.count(AccountSnapshot.id).label("account_count"),
+            )
+            .filter(AccountSnapshot.account_id.in_(account_ids))
+            .group_by(AccountSnapshot.snapshot_date)
+        )
+
+        if start_date is not None:
+            query = query.filter(AccountSnapshot.snapshot_date >= start_date)
+
+        if end_date is not None:
+            query = query.filter(AccountSnapshot.snapshot_date <= end_date)
+
+        results = (
+            query.order_by(AccountSnapshot.snapshot_date.desc())
+            .limit(limit)
+            .all()
+        )
+
+        # Format timeline data
+        timeline = [
+            {
+                "date": r.snapshot_date.isoformat(),
+                "total_balance": float(r.total_balance),
+                "account_count": r.account_count,
+            }
+            for r in results
+        ]
+
+        # Get date range
+        date_range = (
+            self.db.query(
+                func.min(AccountSnapshot.snapshot_date),
+                func.max(AccountSnapshot.snapshot_date),
+            )
+            .filter(AccountSnapshot.account_id.in_(account_ids))
+            .first()
+        )
+
+        earliest_date = date_range[0] if date_range else None
+        latest_date = date_range[1] if date_range else None
+
+        # Get account summary for context
+        accounts = (
+            self.db.query(Account)
+            .filter(Account.id.in_(account_ids))
+            .all()
+        )
+
+        accounts_data = [
+            {
+                "id": str(acc.id),
+                "name": acc.account_name,
+                "institution_name": acc.institution_name,
+                "type": acc.account_type.value if acc.account_type else None,
+                "current_balance": float(acc.current_balance) if acc.current_balance else None,
+            }
+            for acc in accounts
+        ]
+
+        return {
+            "timeline": timeline,
+            "accounts": accounts_data,
+            "earliest_date": earliest_date.isoformat() if earliest_date else None,
+            "latest_date": latest_date.isoformat() if latest_date else None,
+            "total_accounts": len(account_ids),
         }
 
     def _map_plaid_banking_account_type(self, plaid_type: str | None, plaid_subtype: str | None) -> AccountType:

@@ -1,4 +1,13 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
+
+# Configure logging to show INFO level messages
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.allocation.routes import router as allocation_router
@@ -10,9 +19,22 @@ from app.middleware.auth import JWTAuthMiddleware
 from app.middleware.logging import RequestLoggingMiddleware
 from app.plaid.routes import router as plaid_router
 from app.portfolio.routes import router as portfolio_router
+from app.scheduler import shutdown_scheduler, start_scheduler
 from app.tax.routes import router as tax_router
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup
+    start_scheduler()
+    yield
+    # Shutdown
+    shutdown_scheduler()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Quantly Backend",
     docs_url="/docs",
     redoc_url="/redoc",
